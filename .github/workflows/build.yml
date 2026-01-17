@@ -1,0 +1,240 @@
+name: 构建
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_tool:
+        description: '选择构建工具'
+        required: true
+        default: 'pyinstaller'
+        type: choice
+        options:
+          - pyinstaller
+          - nuitka
+  push:
+    tags:
+      - v*
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  builder_matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64]
+        os: [windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.8.10'
+          architecture: ${{ matrix.arch }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/requirements*.txt"
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/
+            dist/
+          key: ${{ runner.os }}-build-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-build-
+
+      - name: Init zip Folder
+        run: mkdir zip
+
+      - name: Init temp files
+        run: |
+          xcopy "utils\\bak\\default.py" "utils\\" /Y
+          xcopy "utils\\bak\\login.py" "utils\\" /Y
+
+      - name: Install Dependencies with uv
+        run: |
+          uv pip install -r requirements.txt
+          uv pip install Pillow
+
+      - name: Install PyInstaller (PR builds)
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'pyinstaller')
+        run: |
+          uv pip install pyinstaller
+          Invoke-WebRequest -Uri "https://github.com/upx/upx/releases/download/v4.2.2/upx-4.2.2-win64.zip" -OutFile "upx.zip"
+          Expand-Archive -Path "upx.zip" -DestinationPath "upx" -Force
+          Move-Item -Path "upx/upx-4.2.2-win64/upx.exe" -Destination "upx.exe" -Force
+          Remove-Item -Path "upx" -Recurse -Force
+          Remove-Item -Path "upx.zip" -Force
+
+      - name: Install Nuitka (Manual builds)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'nuitka'
+        run: |
+          uv pip install nuitka ordered-set zstandard
+
+      - name: Build with PyInstaller
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'pyinstaller')
+        run: |
+          pyinstaller main.py -w `
+          --icon               "img/favicon.ico" `
+          -n                   "ClassManager" `
+          --contents-directory "." `
+          --add-data           "audio;audio" `
+          --add-data           "img;img" `
+          --add-data           "ui;ui" `
+          --add-data           "utils;utils" `
+          --add-data           "LICENSE;." `
+          --add-data           "src;src" `
+          --add-data           "version;." `
+          --add-data           "main.py;." `
+          --hidden-import      "PyQt6.QtWebEngine" `
+          --exclude-module     "PyQt5" `
+          --exclude-module     "PyQt6" `
+          --exclude-module     "tkinter" `
+          --exclude-module     "matplotlib" `
+          --exclude-module     "numpy.random._examples" `
+          --exclude-module     "numpy.core._dotblas" `
+          --exclude-module     "scipy" `
+          --exclude-module     "PIL._imagingtk" `
+          --exclude-module     "PIL._tkinter_finder" `
+          --exclude-module     "win32com" `
+          --exclude-module     "win32api" `
+          --exclude-module     "win32wnet" `
+          --exclude-module     "IPython" `
+          --exclude-module     "notebook" `
+          --exclude-module     "tornado" `
+          --exclude-module     "zmq" `
+          --exclude-module     "docutils" `
+          --exclude-module     "setuptools" `
+          --exclude-module     "distutils" `
+          --strip `
+          --upx-dir           "." `
+          --clean `
+          --distpath           "dist" `
+          --workpath           "build" `
+          --noconfirm
+
+      - name: Build with Nuitka
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'nuitka'
+        run: |
+          python -m nuitka `
+          --standalone `
+          --windows-disable-console `
+          --windows-icon-from-ico="img/favicon.ico" `
+          --output-filename="ClassManager.exe" `
+          --output-dir="dist" `
+          --include-data-dir="audio=audio" `
+          --include-data-dir="img=img" `
+          --include-data-dir="ui=ui" `
+          --include-data-dir="utils=utils" `
+          --include-data-dir="src=src" `
+          --include-data-file="LICENSE=LICENSE" `
+          --include-data-file="version=version" `
+          --include-data-file="main.py=main.py" `
+          --include-package="PyQt6.QtWebEngine" `
+          --noinclude-pytest-mode=nofollow `
+          --noinclude-setuptools-mode=nofollow `
+          --enable-plugin=pyside6 `
+          --assume-yes-for-downloads `
+          --jobs=4 `
+          main.py
+
+      - name: Clean Unnecessary Files (PyInstaller)
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'pyinstaller')
+        run: |
+          Remove-Item -Path "dist/ClassManager/audio/video" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/ClassManager/img/demo" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/ClassManager/img/tips" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/ClassManager/ui/*.ui" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/ClassManager/ui/0-*.bat" -Force -ErrorAction SilentlyContinue
+
+      - name: Clean Unnecessary Files (Nuitka)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'nuitka'
+        run: |
+          Remove-Item -Path "dist/main.dist/audio/video" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/main.dist/img/demo" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/main.dist/img/tips" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/main.dist/ui/*.ui" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "dist/main.dist/ui/0-*.bat" -Force -ErrorAction SilentlyContinue
+
+      - name: Package (PyInstaller)
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'pyinstaller')
+        run: |
+          Compress-Archive -Path "dist/ClassManager/*" -DestinationPath "zip/ClassManager_latest_Windows-x64_PyInstaller.zip" -CompressionLevel Optimal -Force
+
+      - name: Package (Nuitka)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'nuitka'
+        run: |
+          Compress-Archive -Path "dist/main.dist/*" -DestinationPath "zip/ClassManager_latest_Windows-x64_Nuitka.zip" -CompressionLevel Optimal -Force
+
+      - name: Upload Artifact (PyInstaller)
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'pyinstaller')
+        uses: actions/upload-artifact@v4.4.2
+        with:
+          name: ClassManager_latest_Windows-x64_PyInstaller
+          path: ./zip
+
+      - name: Upload Artifact (Nuitka)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_tool == 'nuitka'
+        uses: actions/upload-artifact@v4.4.2
+        with:
+          name: ClassManager_latest_Windows-x64_Nuitka
+          path: ./zip
+
+      - name: Check Commit Message
+        id: check_commit
+        run: |
+          $commit_msg = git log -1 --pretty=%B
+          if ($commit_msg -match '^chore: Release v\d+\.\d+\.\d+(\.[0-9]+)?$') {
+            $version = $commit_msg -replace '^chore: Release (v\d+\.\d+\.\d+(\.[0-9]+)?)$', '$1'
+            echo "version=$version" >> $env:GITHUB_OUTPUT
+            echo "should_release=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "should_release=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Set Build Tool for Release
+        id: set_build_tool
+        run: |
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            echo "build_tool=pyinstaller" >> $env:GITHUB_OUTPUT
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            echo "build_tool=${{ github.event.inputs.build_tool }}" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "build_tool=pyinstaller" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Create Release Tag
+        if: steps.check_commit.outputs.should_release == 'true'
+        run: |
+          git tag ${{ steps.check_commit.outputs.version }}
+          git push origin ${{ steps.check_commit.outputs.version }}
+
+      - name: Release
+        if: steps.check_commit.outputs.should_release == 'true'
+        uses: ./.github/workflows/release.yml
+        with:
+          run_id: ${{ github.run_id }}
+          build_tool: ${{ steps.set_build_tool.outputs.build_tool }}
